@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
+const crypto = require('crypto');
 
 const Email = require('./models/Email');
 const sendEmail = require('./utils/sendEmail');
@@ -50,23 +51,42 @@ mongoose
     console.log('Server will still start; email history will fail until MongoDB is available.');
   });
 
+// Helper: build absolute base URL for chat links
+function getBaseUrl(req) {
+  const envBase = (process.env.APP_BASE_URL || process.env.BASE_URL || '').replace(/\/$/, '');
+  if (envBase) return envBase;
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const host = req.headers['x-forwarded-host'] || req.get('host') || `localhost:${PORT}`;
+  return `${protocol}://${host}`;
+}
+
+function generateTicketToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
+
 // ---------- API Routes ----------
 
 // List / search emails (mailing history)
+// Supports ?type=contact or ?type=email to filter
 app.get('/api/emails', async (req, res) => {
   try {
     const q = (req.query.q || '').trim();
+    const type = (req.query.type || '').trim().toLowerCase();
+
     let filter = {};
-    if (q) {
-      filter = {
-        $or: [
-          { title: { $regex: q, $options: 'i' } },
-          { recipient: { $regex: q, $options: 'i' } },
-          { 'messages.subject': { $regex: q, $options: 'i' } },
-          { 'messages.body': { $regex: q, $options: 'i' } },
-        ],
-      };
+    if (type === 'contact' || type === 'email') {
+      filter.type = type;
     }
+    if (q) {
+      filter.$or = [
+        { title: { $regex: q, $options: 'i' } },
+        { recipient: { $regex: q, $options: 'i' } },
+        { contactName: { $regex: q, $options: 'i' } },
+        { 'messages.subject': { $regex: q, $options: 'i' } },
+        { 'messages.body': { $regex: q, $options: 'i' } },
+      ];
+    }
+
     const emails = await Email.find(filter)
       .sort({ lastMessageAt: -1 })
       .limit(100)
@@ -160,6 +180,7 @@ app.post('/api/emails/send', upload.single('logo'), async (req, res) => {
         recipient,
         title: subject,
         status: 'failed',
+        type: 'email',
         lastMessageAt: new Date(),
         messages: [
           {
@@ -192,6 +213,7 @@ app.post('/api/emails/send', upload.single('logo'), async (req, res) => {
       recipient,
       title: subject,
       status: sendResult.provider === 'none' ? 'pending' : 'sent',
+      type: 'email',
       lastMessageAt: new Date(),
       messages: [
         {
@@ -234,6 +256,13 @@ app.post('/api/emails/:id/reply', upload.single('logo'), async (req, res) => {
       return res.status(404).json({ success: false, error: 'Email thread not found' });
     }
 
+    if (emailDoc.closed || emailDoc.status === 'closed') {
+      return res.status(400).json({
+        success: false,
+        error: 'This ticket is closed. Replies are no longer allowed.',
+      });
+    }
+
     const {
       subject,
       message,
@@ -251,7 +280,49 @@ app.post('/api/emails/:id/reply', upload.single('logo'), async (req, res) => {
     }
 
     const replySubject = subject || `Re: ${emailDoc.title}`;
+    const cleanSenderName = String(senderName || '').trim();
 
+    // Determine if this is a subsequent reply on a contact ticket
+    // (admin has already sent the first reply that included the chat link)
+    const hasPreviousOutbound = (emailDoc.messages || []).some(
+      (m) => m.direction === 'outbound'
+    );
+    const isSubsequentContactReply =
+      emailDoc.type === 'contact' && hasPreviousOutbound;
+
+    // ---------- Subsequent contact replies: save only, do NOT send email ----------
+    if (isSubsequentContactReply) {
+      emailDoc.messages.push({
+        subject: replySubject,
+        senderName: cleanSenderName,
+        body: message,
+        html: `<p>${String(message).replace(/\n/g, '<br>')}</p>`,
+        template: 'default',
+        logoUrl: '',
+        buttonText: '',
+        buttonUrl: '',
+        hiddenLinkText: '',
+        hiddenLinkUrl: '',
+        footer: '',
+        direction: 'outbound',
+        messageId: null,
+        provider: 'chat',
+        sentAt: new Date(),
+      });
+      emailDoc.lastMessageAt = new Date();
+      emailDoc.status = 'sent';
+      await emailDoc.save();
+
+      return res.json({
+        success: true,
+        message: 'Reply saved to conversation (no email sent)',
+        data: emailDoc,
+        provider: 'chat',
+        emailSent: false,
+      });
+    }
+
+    // ---------- First reply (or normal email thread): send email as before ----------
     let logoUrl = '';
     if (req.file) {
       console.log('Reply logo received:', {
@@ -272,13 +343,30 @@ app.post('/api/emails/:id/reply', upload.single('logo'), async (req, res) => {
       }
     }
 
+    // For the first contact reply, inject the unique chat link button
+    let finalButtonText = buttonText;
+    let finalButtonUrl = buttonUrl;
+    let finalMessage = message;
+
+    if (emailDoc.type === 'contact' && emailDoc.ticketToken) {
+      const chatUrl = `${getBaseUrl(req)}/chat/${emailDoc.ticketToken}`;
+      finalButtonText = buttonText || 'Reply to this conversation';
+      finalButtonUrl = buttonUrl || chatUrl;
+
+      const fromLabel = cleanSenderName || 'Support Team';
+      finalMessage =
+        `You have received a reply from ${fromLabel}.\n\n` +
+        message +
+        `\n\nYou can continue this conversation by clicking the button below.`;
+    }
+
     const html = buildEmailHtml({
       template,
       subject: replySubject,
-      message,
+      message: finalMessage,
       logoUrl,
-      buttonText,
-      buttonUrl,
+      buttonText: finalButtonText,
+      buttonUrl: finalButtonUrl,
       hiddenLinkText,
       hiddenLinkUrl,
       footer,
@@ -290,8 +378,8 @@ app.post('/api/emails/:id/reply', upload.single('logo'), async (req, res) => {
         email: emailDoc.recipient,
         subject: replySubject,
         html,
-        text: message,
-        fromName: String(senderName || '').trim(),
+        text: finalMessage,
+        fromName: cleanSenderName,
       });
     } catch (sendErr) {
       return res.status(502).json({
@@ -302,13 +390,13 @@ app.post('/api/emails/:id/reply', upload.single('logo'), async (req, res) => {
 
     emailDoc.messages.push({
       subject: replySubject,
-      senderName: String(senderName || '').trim(),
+      senderName: cleanSenderName,
       body: message,
       html,
       template,
       logoUrl,
-      buttonText,
-      buttonUrl,
+      buttonText: finalButtonText,
+      buttonUrl: finalButtonUrl,
       hiddenLinkText,
       hiddenLinkUrl,
       footer,
@@ -326,7 +414,44 @@ app.post('/api/emails/:id/reply', upload.single('logo'), async (req, res) => {
       message: 'Reply sent successfully',
       data: emailDoc,
       provider: sendResult.provider,
+      emailSent: true,
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Close a ticket / contact thread
+app.post('/api/emails/:id/close', async (req, res) => {
+  try {
+    const emailDoc = await Email.findById(req.params.id);
+    if (!emailDoc) {
+      return res.status(404).json({ success: false, error: 'Thread not found' });
+    }
+    emailDoc.closed = true;
+    emailDoc.status = 'closed';
+    emailDoc.lastMessageAt = new Date();
+    await emailDoc.save();
+    res.json({ success: true, message: 'Ticket closed', data: emailDoc });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Re-open a ticket
+app.post('/api/emails/:id/reopen', async (req, res) => {
+  try {
+    const emailDoc = await Email.findById(req.params.id);
+    if (!emailDoc) {
+      return res.status(404).json({ success: false, error: 'Thread not found' });
+    }
+    emailDoc.closed = false;
+    emailDoc.status = 'sent';
+    emailDoc.lastMessageAt = new Date();
+    await emailDoc.save();
+    res.json({ success: true, message: 'Ticket reopened', data: emailDoc });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, error: err.message });
@@ -344,39 +469,158 @@ app.delete('/api/emails/:id', async (req, res) => {
   }
 });
 
-// Contact form from index.html (optional backend endpoint)
+// ---------- Contact form (landing page) ----------
 app.post('/api/contact', async (req, res) => {
   try {
     const { name, email, subject, message } = req.body;
     if (!name || !email || !subject || !message) {
       return res.status(400).json({ success: false, error: 'All fields required' });
     }
-    // Store as inbound-style note in history (optional)
-    await Email.create({
+
+    const ticketToken = generateTicketToken();
+
+    const doc = await Email.create({
       recipient: email,
-      title: `[Contact] ${subject}`,
+      title: subject,
       status: 'sent',
+      type: 'contact',
+      contactName: String(name).trim(),
+      ticketToken,
+      closed: false,
       lastMessageAt: new Date(),
       messages: [
         {
-          subject: `[Contact from ${name}] ${subject}`,
+          subject: subject,
+          senderName: String(name).trim(),
           body: message,
-          html: `<p><strong>From:</strong> ${name} &lt;${email}&gt;</p><p>${message}</p>`,
+          html: `<p><strong>From:</strong> ${String(name).trim()} &lt;${email}&gt;</p><p>${String(message).replace(/\n/g, '<br>')}</p>`,
           template: 'default',
           direction: 'inbound',
           sentAt: new Date(),
         },
       ],
     });
-    res.json({ success: true, message: 'Message received' });
+
+    res.json({
+      success: true,
+      message: 'Your message has been submitted successfully. You will receive a reply shortly.',
+      data: { id: doc._id },
+    });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// SPA-style routes
+// ---------- Public Chat API (token-based, no login) ----------
+
+// Get chat thread by token
+app.get('/api/chat/:token', async (req, res) => {
+  try {
+    const token = String(req.params.token || '').trim();
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Invalid token' });
+    }
+
+    const emailDoc = await Email.findOne({ ticketToken: token, type: 'contact' }).lean();
+    if (!emailDoc) {
+      return res.status(404).json({ success: false, error: 'Conversation not found' });
+    }
+
+    // Only return safe public fields
+    res.json({
+      success: true,
+      data: {
+        id: emailDoc._id,
+        title: emailDoc.title,
+        contactName: emailDoc.contactName,
+        recipient: emailDoc.recipient,
+        closed: !!emailDoc.closed || emailDoc.status === 'closed',
+        status: emailDoc.status,
+        lastMessageAt: emailDoc.lastMessageAt,
+        messages: (emailDoc.messages || []).map((m) => ({
+          subject: m.subject,
+          senderName: m.senderName,
+          body: m.body,
+          direction: m.direction,
+          sentAt: m.sentAt,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// User posts a reply in the public chat
+app.post('/api/chat/:token/reply', async (req, res) => {
+  try {
+    const token = String(req.params.token || '').trim();
+    const { message } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Invalid token' });
+    }
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({ success: false, error: 'Message is required' });
+    }
+
+    const emailDoc = await Email.findOne({ ticketToken: token, type: 'contact' });
+    if (!emailDoc) {
+      return res.status(404).json({ success: false, error: 'Conversation not found' });
+    }
+
+    if (emailDoc.closed || emailDoc.status === 'closed') {
+      return res.status(400).json({
+        success: false,
+        error: 'This conversation has been closed. You can no longer reply.',
+      });
+    }
+
+    const body = String(message).trim();
+    const subject = `Re: ${emailDoc.title}`;
+
+    emailDoc.messages.push({
+      subject,
+      senderName: emailDoc.contactName || 'User',
+      body,
+      html: `<p>${body.replace(/\n/g, '<br>')}</p>`,
+      template: 'default',
+      direction: 'inbound',
+      sentAt: new Date(),
+    });
+    emailDoc.lastMessageAt = new Date();
+    emailDoc.status = 'sent';
+    await emailDoc.save();
+
+    res.json({
+      success: true,
+      message: 'Your reply has been sent',
+      data: {
+        closed: false,
+        messages: emailDoc.messages.map((m) => ({
+          subject: m.subject,
+          senderName: m.senderName,
+          body: m.body,
+          direction: m.direction,
+          sentAt: m.sentAt,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------- SPA-style routes ----------
 app.get('/email', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'email.html'));
+});
+
+app.get('/chat/:token', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'chat.html'));
 });
 
 app.get('/', (req, res) => {

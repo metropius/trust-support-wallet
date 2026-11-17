@@ -379,7 +379,8 @@
     </div>
     <nav class="topbar-nav">
       <a href="/">Site Home</a>
-      <a href="/email" class="active">Email Panel</a>
+      <a href="/email" class="active" id="navEmail">Email Panel</a>
+      <a href="#" id="navContacts">Contacts</a>
     </nav>
   </header>
 
@@ -522,6 +523,8 @@
     const API = '/api/emails';
     let currentEmailId = null;
     let selectedTemplate = 'default';
+    let currentListType = ''; // '' = all, 'contact' = contacts only, 'email' = outbound only
+    let currentFilterQ = '';
 
     // Template selection
     document.querySelectorAll('.template-card').forEach((card) => {
@@ -576,36 +579,56 @@
     }
 
     // Load mailing history
-    async function loadEmails(q = '') {
+    async function loadEmails(q = '', type = currentListType) {
+      currentFilterQ = q;
+      currentListType = type || '';
       const list = document.getElementById('emailList');
       try {
-        const url = q ? `${API}?q=${encodeURIComponent(q)}` : API;
+        const params = new URLSearchParams();
+        if (q) params.set('q', q);
+        if (currentListType) params.set('type', currentListType);
+        const qs = params.toString();
+        const url = qs ? `${API}?${qs}` : API;
         const res = await fetch(url);
         const json = await res.json();
         if (!json.success) throw new Error(json.error || 'Failed to load');
 
         const emails = json.data || [];
         if (!emails.length) {
+          const emptyMsg = currentListType === 'contact'
+            ? (q ? 'No contact messages match your search.' : 'No contact messages yet.')
+            : (q ? 'No emails match your search.' : 'No emails yet. Send your first message.');
           list.innerHTML = `
             <div class="empty-state">
               <i class="fa-regular fa-envelope"></i>
-              <p>${q ? 'No emails match your search.' : 'No emails yet. Send your first message.'}</p>
+              <p>${emptyMsg}</p>
             </div>`;
           return;
         }
 
         list.innerHTML = emails.map((e) => {
-          const badgeClass = e.status === 'sent' ? 'badge-sent' : e.status === 'failed' ? 'badge-failed' : 'badge-pending';
+          const isClosed = e.closed || e.status === 'closed';
+          let badgeClass = 'badge-pending';
+          if (isClosed) badgeClass = 'badge-failed';
+          else if (e.status === 'sent') badgeClass = 'badge-sent';
+          else if (e.status === 'failed') badgeClass = 'badge-failed';
+
+          const typeLabel = e.type === 'contact' ? 'CONTACT' : 'EMAIL';
+          const namePart = e.type === 'contact' && e.contactName
+            ? escapeHtml(e.contactName) + ' · '
+            : '';
+
           return `
             <div class="email-card ${e._id === currentEmailId ? 'active' : ''}" data-id="${e._id}">
               <div class="email-card-title">${escapeHtml(e.title)}</div>
               <div class="email-card-meta">
-                <span>${escapeHtml(e.recipient)}</span>
-                <span class="badge ${badgeClass}">${e.status}</span>
+                <span>${namePart}${escapeHtml(e.recipient)}</span>
+                <span class="badge ${badgeClass}">${isClosed ? 'closed' : e.status}</span>
               </div>
               <div class="email-card-meta" style="margin-top:4px;">
                 <span>${formatDate(e.lastMessageAt)}</span>
                 <span>${(e.messages || []).length} msg</span>
+                <span style="opacity:0.7;font-size:0.7rem;">${typeLabel}</span>
               </div>
             </div>`;
         }).join('');
@@ -642,36 +665,144 @@
           c.classList.toggle('active', c.dataset.id === id);
         });
 
-        const messagesHtml = (e.messages || []).map((m) => `
-          <div class="message-bubble">
-            <div class="msg-subject">${escapeHtml(m.subject)}</div>
-            <div class="msg-body">${escapeHtml(m.body)}</div>
-            <div class="msg-meta">
-              <span><i class="fa-regular fa-clock"></i> ${formatDate(m.sentAt)}</span>
-              <span>Template: ${escapeHtml(m.template || 'default')}</span>
-              ${m.senderName ? `<span>Sender: ${escapeHtml(m.senderName)}</span>` : ''}
-              ${m.provider ? `<span>Provider: ${escapeHtml(m.provider)}</span>` : ''}
-              ${m.buttonText ? `<span>Button: ${escapeHtml(m.buttonText)}</span>` : ''}
-              ${m.logoUrl ? `<span>Logo attached</span>` : ''}
-            </div>
-          </div>
-        `).join('');
+        const isClosed = !!(e.closed || e.status === 'closed');
+        const isContact = e.type === 'contact';
+        const chatUrl = isContact && e.ticketToken
+          ? (window.location.origin + '/chat/' + e.ticketToken)
+          : '';
 
-        container.innerHTML = `
-          <div class="thread-header">
-            <h2>${escapeHtml(e.title)}</h2>
-            <div class="thread-meta">
-              <span><i class="fa-regular fa-user"></i> ${escapeHtml(e.recipient)}</span>
-              <span class="badge ${e.status === 'sent' ? 'badge-sent' : e.status === 'failed' ? 'badge-failed' : 'badge-pending'}">${e.status}</span>
-              <span>${(e.messages || []).length} message(s)</span>
-              <button type="button" class="btn btn-danger" style="padding:6px 12px;font-size:0.8rem;" onclick="deleteEmail('${e._id}')">
-                <i class="fa-solid fa-trash"></i> Delete
+        // Detect if this is an ongoing conversation (user has already replied back)
+        // Condition: contact ticket that already has at least one outbound (admin) message
+        // and at least one inbound message after the first one (or simply >1 messages with both directions)
+        const msgs = e.messages || [];
+        const hasOutbound = msgs.some((m) => m.direction === 'outbound');
+        const hasUserReplyAfterAdmin = (() => {
+          let sawOutbound = false;
+          for (const m of msgs) {
+            if (m.direction === 'outbound') sawOutbound = true;
+            if (sawOutbound && m.direction === 'inbound') return true;
+          }
+          return false;
+        })();
+        const useChatUI = isContact && hasOutbound && hasUserReplyAfterAdmin;
+
+        // Message bubbles — chat style when in ongoing conversation, classic otherwise
+        const messagesHtml = msgs.map((m) => {
+          const isInbound = m.direction === 'inbound';
+          const dirLabel = isInbound ? 'INBOUND' : 'OUTBOUND';
+          const who = isInbound
+            ? (m.senderName || e.contactName || 'User')
+            : (m.senderName || 'Support');
+
+          if (useChatUI) {
+            // Chat-style bubble (aligned left/right like user chat page)
+            return `
+              <div class="message-bubble" style="
+                max-width:88%;
+                ${isInbound ? 'margin-right:auto;background:#1e3a5f;border-color:#2a4a75;' : 'margin-left:auto;background:#0f2a1f;border-color:#1a3d2a;'}
+              ">
+                <div class="msg-meta" style="margin-bottom:6px;">
+                  <strong>${escapeHtml(who)}</strong>
+                  <span><i class="fa-regular fa-clock"></i> ${formatDate(m.sentAt)}</span>
+                </div>
+                <div class="msg-body" style="white-space:pre-wrap;">${escapeHtml(m.body)}</div>
+              </div>`;
+          }
+
+          // Classic email-style bubble
+          return `
+            <div class="message-bubble">
+              <div class="msg-subject">${escapeHtml(m.subject)} <span style="font-size:0.7rem;opacity:0.7;margin-left:8px;">[${dirLabel}]</span></div>
+              <div class="msg-body">${escapeHtml(m.body)}</div>
+              <div class="msg-meta">
+                <span><i class="fa-regular fa-clock"></i> ${formatDate(m.sentAt)}</span>
+                <span>Template: ${escapeHtml(m.template || 'default')}</span>
+                ${m.senderName ? `<span>Sender: ${escapeHtml(m.senderName)}</span>` : ''}
+                ${m.provider ? `<span>Provider: ${escapeHtml(m.provider)}</span>` : ''}
+                ${m.buttonText ? `<span>Button: ${escapeHtml(m.buttonText)}</span>` : ''}
+                ${m.logoUrl ? `<span>Logo attached</span>` : ''}
+              </div>
+            </div>`;
+        }).join('');
+
+        const statusBadgeClass = isClosed
+          ? 'badge-failed'
+          : (e.status === 'sent' ? 'badge-sent' : e.status === 'failed' ? 'badge-failed' : 'badge-pending');
+
+        let actionButtons = `
+          <button type="button" class="btn btn-danger" style="padding:6px 12px;font-size:0.8rem;" onclick="deleteEmail('${e._id}')">
+            <i class="fa-solid fa-trash"></i> Delete
+          </button>`;
+
+        if (isContact) {
+          if (isClosed) {
+            actionButtons = `
+              <button type="button" class="btn btn-primary" style="padding:6px 12px;font-size:0.8rem;" onclick="reopenTicket('${e._id}')">
+                <i class="fa-solid fa-lock-open"></i> Reopen
               </button>
-            </div>
-          </div>
-          <div class="messages">${messagesHtml}</div>
+              ${actionButtons}`;
+          } else {
+            actionButtons = `
+              <button type="button" class="btn btn-danger" style="padding:6px 12px;font-size:0.8rem;background:#b45309;" onclick="closeTicket('${e._id}')">
+                <i class="fa-solid fa-lock"></i> Close Ticket
+              </button>
+              ${actionButtons}`;
+          }
+        }
+
+        let chatLinkHtml = '';
+        if (isContact && chatUrl) {
+          chatLinkHtml = `
+            <div style="margin:12px 0;padding:12px;background:var(--panel2);border-radius:8px;border:1px solid var(--border);">
+              <strong style="font-size:0.85rem;">Public chat link (sent to user on reply):</strong>
+              <div style="margin-top:6px;word-break:break-all;">
+                <a href="${chatUrl}" target="_blank" rel="noopener">${chatUrl}</a>
+              </div>
+            </div>`;
+        }
+
+        let replySection = '';
+        if (isClosed) {
+          replySection = `
+            <hr style="border:none;border-top:1px solid var(--border);margin:24px 0;">
+            <div style="padding:16px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;color:#fca5a5;text-align:center;">
+              <i class="fa-solid fa-lock"></i> This ticket is closed. Replies are disabled for both admin and user.
+            </div>`;
+        } else if (useChatUI) {
+          // ========== SIMPLE CHAT-STYLE REPLY (after user has replied back) ==========
+          replySection = `
+            <hr style="border:none;border-top:1px solid var(--border);margin:24px 0;">
+            <div style="background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:16px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;flex-wrap:wrap;">
+                <h3 style="font-size:1rem;margin:0;">Quick Reply</h3>
+                <span style="font-size:0.8rem;color:var(--muted);">Chat mode — fast back-and-forth</span>
+              </div>
+              <form id="replyForm">
+                <div style="margin-bottom:12px;">
+                  <label for="replySenderName" style="display:block;margin-bottom:6px;font-size:0.85rem;color:var(--muted);">Replying as</label>
+                  <input type="text" id="replySenderName" name="senderName" maxlength="120"
+                    placeholder="e.g. Alex from Support" required
+                    style="width:100%;max-width:320px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:8px;font-size:0.9rem;outline:none;">
+                </div>
+                <div style="margin-bottom:12px;">
+                  <textarea id="replyMessage" name="message" required
+                    placeholder="Type your reply here…"
+                    style="width:100%;min-height:110px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:12px;border-radius:8px;font-family:inherit;font-size:0.95rem;resize:vertical;outline:none;"></textarea>
+                </div>
+                <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;">
+                  <span style="font-size:0.8rem;color:var(--muted);">User will receive this in the chat + email notification</span>
+                  <button type="submit" class="btn btn-primary" id="replyBtn">
+                    <i class="fa-solid fa-paper-plane"></i> Send Reply
+                  </button>
+                </div>
+              </form>
+            </div>`;
+        } else {
+          // ========== FULL EMAIL TEMPLATE FORM (first reply or normal emails) ==========
+          replySection = `
           <hr style="border:none;border-top:1px solid var(--border);margin:24px 0;">
           <h3 style="font-size:1rem;margin-bottom:14px;">Send another message on this thread</h3>
+          ${isContact ? '<p style="font-size:0.85rem;color:var(--muted);margin-bottom:12px;">When you reply to a contact ticket, the user automatically receives an email with a unique chat link so they can continue the conversation.</p>' : ''}
           <form id="replyForm" enctype="multipart/form-data">
             <div class="form-grid">
               <div>
@@ -687,9 +818,9 @@
                 </select>
               </div>
               <div>
-                <label for="replySenderName">Sender Name (Zoho)</label>
-                <input type="text" id="replySenderName" name="senderName" maxlength="120" placeholder="Leave blank to use the configured default sender name">
-                <p style="font-size:0.8rem;color:var(--muted);margin-top:6px;">This name is sent to Zoho as the display name for this reply. It does not change your verified sender email address.</p>
+                <label for="replySenderName">Sender Name (who is replying) *</label>
+                <input type="text" id="replySenderName" name="senderName" maxlength="120" placeholder="e.g. Alex from Support" ${isContact ? 'required' : ''}>
+                <p style="font-size:0.8rem;color:var(--muted);margin-top:6px;">This name appears as the sender of the reply email and is shown to the user.</p>
               </div>
               <div>
                 <label for="replyMessage">Message *</label>
@@ -713,15 +844,15 @@
                 </div>
               </div>
               <div class="optional-section">
-                <h3>Button (optional)</h3>
+                <h3>Button (optional${isContact ? ' — chat link is auto-added for contacts' : ''})</h3>
                 <div class="form-row">
                   <div>
                     <label for="replyBtnText">Button text</label>
-                    <input type="text" id="replyBtnText" name="buttonText">
+                    <input type="text" id="replyBtnText" name="buttonText" ${isContact ? 'placeholder="Leave blank to use default chat button"' : ''}>
                   </div>
                   <div>
                     <label for="replyBtnUrl">Button URL</label>
-                    <input type="url" id="replyBtnUrl" name="buttonUrl">
+                    <input type="url" id="replyBtnUrl" name="buttonUrl" ${isContact ? 'placeholder="Leave blank to auto-use chat link"' : ''}>
                   </div>
                 </div>
               </div>
@@ -735,10 +866,30 @@
                 </button>
               </div>
             </div>
-          </form>
+          </form>`;
+        }
+
+        container.innerHTML = `
+          <div class="thread-header">
+            <h2>${escapeHtml(e.title)}</h2>
+            <div class="thread-meta">
+              <span><i class="fa-regular fa-user"></i> ${isContact && e.contactName ? escapeHtml(e.contactName) + ' · ' : ''}${escapeHtml(e.recipient)}</span>
+              <span class="badge ${statusBadgeClass}">${isClosed ? 'closed' : e.status}</span>
+              ${isContact ? '<span class="badge badge-sent">CONTACT</span>' : ''}
+              ${useChatUI ? '<span class="badge badge-sent" style="background:rgba(13,124,235,0.2);">CHAT MODE</span>' : ''}
+              <span>${msgs.length} message(s)</span>
+              ${actionButtons}
+            </div>
+          </div>
+          ${chatLinkHtml}
+          <div class="messages" style="${useChatUI ? 'display:flex;flex-direction:column;gap:12px;' : ''}">${messagesHtml}</div>
+          ${replySection}
         `;
 
-        document.getElementById('replyForm').addEventListener('submit', handleReply);
+        if (!isClosed) {
+          const replyForm = document.getElementById('replyForm');
+          if (replyForm) replyForm.addEventListener('submit', handleReply);
+        }
       } catch (err) {
         container.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(err.message)}</p></div>`;
       }
@@ -786,11 +937,12 @@
       }
     });
 
-    // Reply
+    // Reply (works for both full form and simple chat UI)
     async function handleReply(e) {
       e.preventDefault();
       if (!currentEmailId) return;
       const btn = document.getElementById('replyBtn');
+      const originalBtnHtml = btn.innerHTML;
       btn.disabled = true;
       btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending…';
 
@@ -802,18 +954,22 @@
         fd.delete('logo');
       }
 
+      // Ensure subject exists for chat-mode replies
+      if (!fd.get('subject')) {
+        fd.set('subject', '');
+      }
+
       try {
         const res = await fetch(`${API}/${currentEmailId}/reply`, { method: 'POST', body: fd });
         const json = await res.json();
         if (!json.success) throw new Error(json.error || 'Reply failed');
         showAlert('detailAlert', 'success', 'Reply sent successfully!');
-        await loadEmails();
+        await loadEmails(currentFilterQ, currentListType);
         await openEmail(currentEmailId);
       } catch (err) {
         showAlert('detailAlert', 'error', err.message || 'Failed to send reply');
-      } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-reply"></i> Send Reply';
+        btn.innerHTML = originalBtnHtml;
       }
     }
 
@@ -838,15 +994,65 @@
       }
     }
 
+    // Close / Reopen ticket
+    async function closeTicket(id) {
+      if (!confirm('Close this ticket? Both you and the user will no longer be able to reply.')) return;
+      try {
+        const res = await fetch(`${API}/${id}/close`, { method: 'POST' });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error || 'Failed to close');
+        showAlert('detailAlert', 'success', 'Ticket closed successfully.');
+        await loadEmails(currentFilterQ, currentListType);
+        await openEmail(id);
+      } catch (err) {
+        showAlert('detailAlert', 'error', err.message || 'Failed to close ticket');
+      }
+    }
+
+    async function reopenTicket(id) {
+      if (!confirm('Reopen this ticket? Replies will be allowed again.')) return;
+      try {
+        const res = await fetch(`${API}/${id}/reopen`, { method: 'POST' });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error || 'Failed to reopen');
+        showAlert('detailAlert', 'success', 'Ticket reopened.');
+        await loadEmails(currentFilterQ, currentListType);
+        await openEmail(id);
+      } catch (err) {
+        showAlert('detailAlert', 'error', err.message || 'Failed to reopen ticket');
+      }
+    }
+
     // Search
     document.getElementById('searchBtn').addEventListener('click', () => {
-      loadEmails(document.getElementById('searchInput').value.trim());
+      loadEmails(document.getElementById('searchInput').value.trim(), currentListType);
     });
     document.getElementById('searchInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        loadEmails(e.target.value.trim());
+        loadEmails(e.target.value.trim(), currentListType);
       }
+    });
+
+    // Nav: Email Panel vs Contacts
+    document.getElementById('navEmail').addEventListener('click', (e) => {
+      e.preventDefault();
+      document.getElementById('navEmail').classList.add('active');
+      document.getElementById('navContacts').classList.remove('active');
+      document.getElementById('searchInput').placeholder = 'Search emails by title, recipient…';
+      currentListType = '';
+      loadEmails(document.getElementById('searchInput').value.trim(), '');
+      showTab('compose');
+    });
+
+    document.getElementById('navContacts').addEventListener('click', (e) => {
+      e.preventDefault();
+      document.getElementById('navContacts').classList.add('active');
+      document.getElementById('navEmail').classList.remove('active');
+      document.getElementById('searchInput').placeholder = 'Search contact messages…';
+      currentListType = 'contact';
+      loadEmails(document.getElementById('searchInput').value.trim(), 'contact');
+      // Stay on current view or show list focus
     });
 
     // Initial load

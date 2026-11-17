@@ -22,7 +22,20 @@ const emailSchema = new mongoose.Schema(
   {
     recipient: { type: String, required: true, index: true },
     title: { type: String, required: true },
-    status: { type: String, enum: ['sent', 'failed', 'pending'], default: 'sent' },
+    status: {
+      type: String,
+      enum: ['sent', 'failed', 'pending', 'closed'],
+      default: 'sent',
+    },
+    type: {
+      type: String,
+      enum: ['email', 'contact'],
+      default: 'email',
+      index: true,
+    },
+    contactName: { type: String, default: '' },
+    ticketToken: { type: String, index: true, sparse: true, unique: true },
+    closed: { type: Boolean, default: false },
     messages: [messageSchema],
     lastMessageAt: { type: Date, default: Date.now },
   },

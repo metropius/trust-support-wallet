@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Support Conversation | Trust Wallet Support</title>
+  <meta name="theme-color" content="#0D7CEB">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #141c2e;
+      --panel2: #1a2438;
+      --border: #243049;
+      --text: #e8eef8;
+      --muted: #8b9bb8;
+      --primary: #0D7CEB;
+      --primary-hover: #0a6ad0;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --radius: 12px;
+      --inbound: #1e3a5f;
+      --outbound: #0f2a1f;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+    }
+    a { color: var(--primary); text-decoration: none; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1rem;
+    }
+    .topbar-brand i { color: var(--primary); }
+    .status-pill {
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .status-open { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+    .status-closed { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+    .chat-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    .chat-header {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      margin-bottom: 14px;
+    }
+    .chat-header h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .chat-header p {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-bottom: 12px;
+      min-height: 280px;
+    }
+    .bubble {
+      max-width: 88%;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .bubble.inbound {
+      align-self: flex-start;
+      background: var(--inbound);
+      border-color: #2a4a75;
+    }
+    .bubble.outbound {
+      align-self: flex-end;
+      background: var(--outbound);
+      border-color: #1a3d2a;
+    }
+    .bubble .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .bubble .body {
+      font-size: 0.95rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .reply-box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-top: 8px;
+    }
+    .reply-box.hidden { display: none; }
+    .reply-box textarea {
+      width: 100%;
+      min-height: 100px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      resize: vertical;
+      outline: none;
+    }
+    .reply-box textarea:focus { border-color: var(--primary); }
+    .reply-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+      gap: 10px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .closed-banner {
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      color: #fca5a5;
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      text-align: center;
+      font-size: 0.9rem;
+      margin-top: 8px;
+    }
+    .closed-banner.hidden { display: none; }
+    .loading, .error-state {
+      text-align: center;
+      color: var(--muted);
+      padding: 40px 16px;
+    }
+    .error-state { color: #fca5a5; }
+    .alert {
+      display: none;
+      padding: 10px 14px;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      font-size: 0.9rem;
+    }
+    .alert.show { display: block; }
+    .alert-success { background: rgba(34,197,94,0.15); color: #86efac; border: 1px solid rgba(34,197,94,0.3); }
+    .alert-error { background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.3); }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <i class="fa-solid fa-shield-halved"></i>
+      <span>Trust Wallet Support</span>
+    </div>
+    <span class="status-pill status-open" id="statusPill">Open</span>
+  </header>
+
+  <div class="chat-wrap">
+    <div class="chat-header">
+      <h1 id="chatTitle">Loading conversation…</h1>
+      <p id="chatSub">Please wait</p>
+    </div>
+
+    <div id="alertBox" class="alert"></div>
+
+    <div class="messages" id="messages">
+      <div class="loading">Loading messages…</div>
+    </div>
+
+    <div class="reply-box" id="replyBox">
+      <textarea id="replyInput" placeholder="Type your reply here…"></textarea>
+      <div class="reply-actions">
+        <span style="color:var(--muted);font-size:0.8rem;">Your reply will be sent to our support team</span>
+        <button type="button" class="btn btn-primary" id="sendBtn">
+          <i class="fa-solid fa-paper-plane"></i> Send Reply
+        </button>
+      </div>
+    </div>
+
+    <div class="closed-banner hidden" id="closedBanner">
+      <i class="fa-solid fa-lock"></i>
+      This conversation has been closed. You can no longer send replies.
+    </div>
+  </div>
+
+  <script>
+    const token = window.location.pathname.split('/').filter(Boolean).pop();
+    const messagesEl = document.getElementById('messages');
+    const replyBox = document.getElementById('replyBox');
+    const closedBanner = document.getElementById('closedBanner');
+    const statusPill = document.getElementById('statusPill');
+    const sendBtn = document.getElementById('sendBtn');
+    const replyInput = document.getElementById('replyInput');
+    let isClosed = false;
+
+    function escapeHtml(str) {
+      const d = document.createElement('div');
+      d.textContent = str || '';
+      return d.innerHTML;
+    }
+
+    function formatDate(d) {
+      if (!d) return '';
+      return new Date(d).toLocaleString();
+    }
+
+    function showAlert(type, text) {
+      const el = document.getElementById('alertBox');
+      el.className = 'alert show alert-' + type;
+      el.textContent = text;
+      setTimeout(() => el.classList.remove('show'), 5000);
+    }
+
+    function renderMessages(messages) {
+      if (!messages || !messages.length) {
+        messagesEl.innerHTML = '<div class="loading">No messages yet.</div>';
+        return;
+      }
+      messagesEl.innerHTML = messages.map((m) => {
+        const dir = m.direction === 'inbound' ? 'inbound' : 'outbound';
+        const label = m.direction === 'inbound'
+          ? (m.senderName || 'You')
+          : (m.senderName || 'Support');
+        return `
+          <div class="bubble ${dir}">
+            <div class="meta">
+              <strong>${escapeHtml(label)}</strong>
+              <span>${formatDate(m.sentAt)}</span>
+            </div>
+            <div class="body">${escapeHtml(m.body)}</div>
+          </div>`;
+      }).join('');
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function setClosedState(closed) {
+      isClosed = !!closed;
+      if (isClosed) {
+        replyBox.classList.add('hidden');
+        closedBanner.classList.remove('hidden');
+        statusPill.textContent = 'Closed';
+        statusPill.className = 'status-pill status-closed';
+      } else {
+        replyBox.classList.remove('hidden');
+        closedBanner.classList.add('hidden');
+        statusPill.textContent = 'Open';
+        statusPill.className = 'status-pill status-open';
+      }
+    }
+
+    async function loadChat() {
+      try {
+        const res = await fetch('/api/chat/' + encodeURIComponent(token));
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'Conversation not found');
+
+        const data = json.data;
+        document.getElementById('chatTitle').textContent = data.title || 'Support Conversation';
+        document.getElementById('chatSub').textContent =
+          'Conversation with ' + (data.contactName || data.recipient || 'you');
+
+        setClosedState(data.closed);
+        renderMessages(data.messages || []);
+      } catch (err) {
+        messagesEl.innerHTML = `<div class="error-state"><p>${escapeHtml(err.message)}</p></div>`;
+        replyBox.classList.add('hidden');
+        statusPill.textContent = 'Error';
+        statusPill.className = 'status-pill status-closed';
+      }
+    }
+
+    async function sendReply() {
+      if (isClosed) return;
+      const message = replyInput.value.trim();
+      if (!message) {
+        showAlert('error', 'Please enter a message');
+        return;
+      }
+
+      sendBtn.disabled = true;
+      sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending…';
+
+      try {
+        const res = await fetch('/api/chat/' + encodeURIComponent(token) + '/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message }),
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'Failed to send');
+
+        replyInput.value = '';
+        showAlert('success', 'Your reply has been sent successfully.');
+        renderMessages(json.data.messages || []);
+        setClosedState(json.data.closed);
+      } catch (err) {
+        showAlert('error', err.message || 'Could not send reply');
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Send Reply';
+      }
+    }
+
+    sendBtn.addEventListener('click', sendReply);
+    replyInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        sendReply();
+      }
+    });
+
+    loadChat();
+  </script>
+</body>
+</html>
